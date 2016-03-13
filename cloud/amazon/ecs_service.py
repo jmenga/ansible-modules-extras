@@ -32,7 +32,7 @@ options:
         description:
           - The desired state of the service
         required: true
-        choices: ["present", "absent", "deleting"]
+        choices: ["present", "absent", "deleting", "update"]
     name:
         description:
           - The name of the service
@@ -49,10 +49,13 @@ options:
         description:
           - The list of ELBs defined for this service
         required: false
-
     desired_count:
         description:
           - The count of how many instances of the service
+        required: false
+    deployment_config:
+        description:
+            - A deployment configuration dictionary describing the minimumHealthPercent and maximumPercent deployment parameters for the service
         required: false
     client_token:
         description:
@@ -72,6 +75,11 @@ options:
           - The number of times to check that the service is available
         required: false
         default: 10
+    wait:
+        description:
+            - Wait for the task to complete (stop).
+        required: False
+        default: no
 extends_documentation_fragment:
     - aws
     - ec2
@@ -83,7 +91,7 @@ EXAMPLES = '''
     state: present
     name: console-test-service
     cluster: new_cluster
-    task_definition: new_cluster-task:1"
+    task_definition: new_cluster-task:1
     desired_count: 0
 
 # Basic provisioning example
@@ -97,6 +105,17 @@ EXAMPLES = '''
     name: default
     state: absent
     cluster: new_cluster
+
+# Setting the deployment configuratino
+- ecs_service:
+    state: present
+    name: console-test-service
+    cluster: new_cluster
+    task_definition: my_task_definition
+    desired_count: 1
+    deployment_config:
+        minimumHealthyPercent: 50
+        maximumPercent: 200
 '''
 
 # Disabled the RETURN as it was breaking docs building.  Someone needs to fix
@@ -174,7 +193,7 @@ class EcsServiceManager:
             c = self.find_in_array(response['failures'], service_name, 'arn')
             msg += ", failure reason is "+c['reason']
             if c and c['reason']=='MISSING':
-                return None
+                return {}
             # fall thru and look through found ones
         if len(response['services'])>0:
             c = self.find_in_array(response['services'], service_name)
@@ -183,7 +202,7 @@ class EcsServiceManager:
         raise StandardError("Unknown problem describing service %s." % service_name)
 
     def create_service(self, service_name, cluster_name, task_definition,
-        load_balancers, desired_count, client_token, role):
+        load_balancers, desired_count, client_token, role, deployment_config):
         response = self.ecs.create_service(
             cluster=cluster_name,
             serviceName=service_name,
@@ -191,20 +210,29 @@ class EcsServiceManager:
             loadBalancers=load_balancers,
             desiredCount=desired_count,
             clientToken=client_token,
-            role=role)
-        # some fields are datetime which is not JSON serializable
-        # make them strings
+            role=role,
+            deploymentConfiguration=deployment_config)
+        if wait:
+            """Waits for service to become stable"""
+            waiter = self.ecs.get_waiter('services_stable')
+            waiter.wait(cluster=cluster_name, services=[ service_name ])
+            response['service'] = self.describe_service(cluster_name, service_name)
         service = response['service']
-        if 'deployments' in service:
-            for d in service['deployments']:
-                if 'createdAt' in d:
-                    d['createdAt'] = str(d['createdAt'])
-                if 'updatedAt' in d:
-                    d['updatedAt'] = str(d['updatedAt'])
-        if 'events' in service:
-            for e in service['events']:
-                if 'createdAt' in e:
-                    e['createdAt'] = str(e['createdAt'])
+        return service
+
+    def update_service(self, service_name, cluster_name, task_definition, desired_count, deployment_config, wait):
+        response = self.ecs.update_service(
+            cluster=cluster_name,
+            service=service_name,
+            taskDefinition=task_definition,
+            desiredCount=desired_count,
+            deploymentConfiguration=deployment_config)
+        if wait:
+            """Waits for service to become stable"""
+            waiter = self.ecs.get_waiter('services_stable')
+            waiter.wait(cluster=cluster_name, services=[ service_name ])
+            response['service'] = self.describe_service(cluster_name, service_name)
+        service = response['service']
         return service
 
     def delete_service(self, service, cluster=None):
@@ -214,16 +242,18 @@ def main():
 
     argument_spec = ec2_argument_spec()
     argument_spec.update(dict(
-        state=dict(required=True, choices=['present', 'absent', 'deleting'] ),
+        state=dict(required=True, choices=['present', 'absent', 'deleting', 'update'] ),
         name=dict(required=True, type='str' ),
         cluster=dict(required=False, type='str' ),
         task_definition=dict(required=False, type='str' ),
         load_balancers=dict(required=False, type='list' ),
+        deployment_config=dict(required=False, type='dict'),
         desired_count=dict(required=False, type='int' ),
         client_token=dict(required=False, type='str' ),
         role=dict(required=False, type='str' ),
         delay=dict(required=False, type='int', default=10),
-        repeat=dict(required=False, type='int', default=10)
+        repeat=dict(required=False, type='int', default=10),
+        wait=dict(required=False, type='bool', default=True)
     ))
 
     module = AnsibleModule(argument_spec=argument_spec, supports_check_mode=True)
@@ -233,56 +263,71 @@ def main():
 
     if not HAS_BOTO3:
       module.fail_json(msg='boto3 is required.')
-
-    if module.params['state'] == 'present':
-        if not 'task_definition' in module.params and module.params['task_definition'] is None:
+    
+    if module.params['state'] == 'update':
+        update_params = [module.params.get(key) for key in ['task_definition', 'desired_count', 'deployment_config']]
+        if update_params.count(None) == len(update_params):
+            module.fail_json(msg="To update a service, you must specify one of task_definition, desired_count or deployment_config")
+    else:
+        if not module.params.get('task_definition'):
             module.fail_json(msg="To use create a service, a task_definition must be specified")
-        if not 'desired_count' in module.params and module.params['desired_count'] is None:
+        if not module.params.get('desired_count'):
             module.fail_json(msg="To use create a service, a desired_count must be specified")
-
+                
     service_mgr = EcsServiceManager(module)
     try:
         existing = service_mgr.describe_service(module.params['cluster'], module.params['name'])
     except Exception, e:
         module.fail_json(msg="Exception describing service '"+module.params['name']+"' in cluster '"+module.params['cluster']+"': "+str(e))
 
-    results = dict(changed=False )
+    # Check service exists and is active for updates
+    if (not existing or existing.get('status') != "ACTIVE") and module.params['state'] == 'update':
+        module.fail_json(msg="Service was not found or is not active.")
+
+    results = dict(changed=False)
     if module.params['state'] == 'present':
-        if existing and 'status' in existing and existing['status']=="ACTIVE":
-            del existing['deployments']
-            del existing['events']
+        if existing and existing.get('status') == "ACTIVE":
             results['service']=existing
         else:
             if not module.check_mode:
-                if module.params['load_balancers'] is None:
-                    loadBalancers = []
-                else:
-                    loadBalancers = module.params['load_balancers']
-                if module.params['role'] is None:
-                    role = ''
-                else:
-                    role = module.params['role']
-                if module.params['client_token'] is None:
-                    clientToken = ''
-                else:
-                    clientToken = module.params['client_token']
-                # doesn't exist. create it.
+                if existing.get('status') != "ACTIVE":
+                    existing={}
+                loadBalancers = module.params.get('load_balancers') or []
+                role = module.params.get('role') or ''
+                desiredCount = module.params.get('desired_count')
+                taskDefinition = module.params.get('task_definition')
+                deploymentConfig = module.params.get('deployment_config')
+                clientToken = module.params.get('client_token') or ''
+                wait = module.params.get('wait')
+
+                # Service doesn't exist or is inactive so create the service
                 response = service_mgr.create_service(module.params['name'],
                     module.params['cluster'],
-                    module.params['task_definition'],
+                    taskDefinition,
                     loadBalancers,
-                    module.params['desired_count'],
+                    desiredCount,
                     clientToken,
-                    role)
-                # the bad news is the result has datetime fields that aren't JSON serializable
-                # nuk'em!
-
-                del response['deployments']
-                del response['events']
-                
+                    role,
+                    deploymentConfig,
+                    wait)
                 results['service'] = response
-
             results['changed'] = True
+
+    elif module.params['state'] == 'update':
+        if not module.check_mode:
+            loadBalancers = module.params.get('load_balancers') or []
+            desiredCount = module.params.get('desired_count') or existing.get('desiredCount')
+            taskDefinition = module.params.get('task_definition') or existing.get('taskDefinition')
+            deploymentConfig = module.params.get('deployment_config') or existing.get('deploymentConfiguration')
+            wait = module.params.get('wait') 
+            response = service_mgr.update_service(module.params['name'],
+                module.params['cluster'],
+                taskDefinition,
+                desiredCount,
+                deploymentConfig,
+                wait)
+            results['service'] = response
+        results['changed'] = True
 
     elif module.params['state'] == 'absent':
         if not existing:
