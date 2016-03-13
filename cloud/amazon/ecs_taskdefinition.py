@@ -28,7 +28,7 @@ options:
         description:
             - State whether the task definition should exist or be deleted
         required: true
-        choices: ['present', 'absent']
+        choices: ['present', 'update', 'absent']
     arn:
         description:
             - The arn of the task description to delete
@@ -89,6 +89,13 @@ EXAMPLES = '''
     family: test-cluster-taskdef
     state: present
   register: task_output
+- name: "Update an existing task definition to newer image tag of httpd:2.4.1 - a new revision will be created"
+  ecs_taskdefinition:
+    state: update
+    family: test-cluster-taskdef
+    containers:
+    - name: simple-app
+      image: "httpd:2.4.1"
 '''
 RETURN = '''
 taskdefinition:
@@ -138,11 +145,21 @@ class EcsTaskManager:
         response = self.ecs.deregister_task_definition(taskDefinition=taskArn)
         return response['taskDefinition']
 
+def merge_lists(items, updates, key):
+    result = []
+    for item in items:
+        update = next((u for u in updates if u[key] == item[key]), None)
+        if update:
+            result.append(dict(item,**update))
+        else:
+            result.append(item)
+    return result
+
 def main():
 
     argument_spec = ec2_argument_spec()
     argument_spec.update(dict(
-        state=dict(required=True, choices=['present', 'absent'] ),
+        state=dict(required=True, choices=['present', 'absent', 'update'] ),
         arn=dict(required=False, type='str' ),
         family=dict(required=False, type='str' ),
         revision=dict(required=False, type='int' ),
@@ -176,6 +193,13 @@ def main():
         if not 'containers' in module.params:
             module.fail_json(msg="To use task definitions, a list of containers must be specified")
         task_to_describe = module.params['family']
+    # When updatting a task, we can specify the ARN or the family with optional revision.
+    if module.params['state'] == 'update':
+        task_to_describe = module.params.get('arn') or module.params.get('family')
+        if not task_to_describe:
+            module.fail_json(msg="To update a task definition, an arn or family must be specified")
+        if module.params.get('revision'):
+            task_to_describe += ':' + str(module.params['revision'])
 
     task_mgr = EcsTaskManager(module)
     existing = task_mgr.describe_task(task_to_describe)
@@ -195,6 +219,22 @@ def main():
                 results['taskdefinition'] = task_mgr.register_task(module.params['family'],
                     module.params['containers'], volumes)
             results['changed'] = True
+    
+    elif module.params['state'] == 'update':
+        if not module.check_mode:
+            updated_containers = []
+            updated_volumes = []
+            if not existing:
+                module.fail_json(msg="No existing task definition to update could be found")
+            if module.params.get('containers'):
+                updated_containers = merge_lists(existing['containerDefinitions'], module.params['containers'], 'name')
+            if module.params.get('volumes'):
+                updated_volumes = merge_lists(existing['volumes'], module.params['volumes'], 'name')
+            results['taskdefinition'] = task_mgr.register_task(
+                module.params.get('family') or existing.get('family'),
+                updated_containers or existing.get('containerDefinitions'),
+                updated_volumes or existing.get('volumes'))
+        results['changed'] = True  
 
     # delete the cloudtrai
     elif module.params['state'] == 'absent':
