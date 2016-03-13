@@ -57,6 +57,11 @@ options:
         description:
             - A value showing who or what started the task (for informational purposes)
         required: False
+    wait:
+        description:
+            - Wait for the task to complete (stop).
+        required: False
+        default: no
 extends_documentation_fragment:
     - aws
     - ec2
@@ -153,6 +158,7 @@ task:
             type: string
 '''
 try:
+    import datetime
     import boto
     import botocore
     HAS_BOTO = True
@@ -179,10 +185,23 @@ class EcsExecManager:
         except boto.exception.NoAuthHandlerFound, e:
             module.fail_json(msg="Can't authorize connection - "+str(e))
 
+    def describe_tasks(self, cluster, task_arns):
+        response = self.ecs.describe_tasks(
+            cluster = cluster,
+            tasks = task_arns)
+        return response['tasks']
+
     def list_tasks(self, cluster_name, service_name, status):
+        # describe task definition first, this is required to determine the task definition family 
+        task_definition = self.ecs.describe_task_definition(taskDefinition=service_name)
+        if task_definition['taskDefinition']:
+            family = task_definition['taskDefinition']['family']
+        else:
+            self.module.fail_json(msg="Invalid task definition")
+
         response = self.ecs.list_tasks(
             cluster=cluster_name,
-            family=service_name,
+            family=family,
             desiredStatus=status
         )
         if len(response['taskArns'])>0:
@@ -191,7 +210,7 @@ class EcsExecManager:
                     return c
         return None
 
-    def run_task(self, cluster, task_definition, overrides, count, startedBy):
+    def run_task(self, cluster, task_definition, overrides, count, startedBy, wait):
         if overrides is None:
             overrides = dict()
         response = self.ecs.run_task(
@@ -201,9 +220,13 @@ class EcsExecManager:
             count=count,
             startedBy=startedBy)
         # include tasks and failures
+        if wait:
+            task_arns = [ task['taskArn'] for task in response['tasks'] ]
+            self.wait_until_stopped(cluster, task_arns)
+            response['tasks'] = self.describe_tasks(cluster, task_arns)
         return response['tasks']
 
-    def start_task(self, cluster, task_definition, overrides, container_instances, startedBy):
+    def start_task(self, cluster, task_definition, overrides, container_instances, startedBy, wait):
         args = dict()
         if cluster:
             args['cluster'] = cluster
@@ -217,11 +240,34 @@ class EcsExecManager:
             args['startedBy']=startedBy
         response = self.ecs.start_task(**args)
         # include tasks and failures
+        if wait:
+            task_arns = [ task['taskArn'] for task in response['tasks'] ]
+            self.wait_until_stopped(cluster, task_arns)
+            response['tasks'] = self.describe_tasks(cluster, task_arns)
         return response['tasks']
 
     def stop_task(self, cluster, task):
         response = self.ecs.stop_task(cluster=cluster, task=task)
         return response['task']
+    
+    def wait_until_stopped(self, cluster_name, task_arns):
+        """Waits for tasks to complete (stop)"""
+        if task_arns:
+            waiter = self.ecs.get_waiter('tasks_stopped')
+            waiter.wait(cluster=cluster_name, tasks=task_arns)
+
+def json_serial(obj):
+    """JSON serializer for objects not serializable by default json code"""
+    if isinstance(obj, datetime.datetime):
+        serial = obj.isoformat()
+        return serial
+    raise TypeError ("Type not serializable")
+
+def fix_datetime(result):
+    """Temporary fix to convert datetime fields from Boto3 to datetime string."""
+    """See https://github.com/ansible/ansible-modules-extras/issues/1348."""
+    """Not required for Ansible 2.1"""
+    return json.loads(json.dumps(result, default=json_serial))
 
 def main():
     argument_spec = ec2_argument_spec()
@@ -233,7 +279,8 @@ def main():
         count=dict(required=False, type='int' ), # R
         task=dict(required=False, type='str' ), # P*
         container_instances=dict(required=False, type='list'), # S*
-        started_by=dict(required=False, type='str' ) # R S
+        started_by=dict(required=False, default='ansible', type='str' ), # R S
+        wait=dict(required=False, default=True, type='bool')
     ))
 
     module = AnsibleModule(argument_spec=argument_spec, supports_check_mode=True)
@@ -278,12 +325,13 @@ def main():
             results['task']=existing
         else:
             if not module.check_mode:
-                results['task'] = service_mgr.run_task(
+                results['task'] = fix_datetime(service_mgr.run_task(
                     module.params['cluster'],
                     module.params['task_definition'],
                     module.params['overrides'],
                     module.params['count'],
-                    module.params['started_by'])
+                    module.params['started_by'],
+                    module.params['wait']))
             results['changed'] = True
 
     elif module.params['operation'] == 'start':
@@ -292,13 +340,14 @@ def main():
             results['task']=existing
         else:
             if not module.check_mode:
-                results['task'] = service_mgr.start_task(
+                results['task'] = fix_datetime(service_mgr.start_task(
                     module.params['cluster'],
                     module.params['task_definition'],
                     module.params['overrides'],
                     module.params['container_instances'],
-                    module.params['started_by']
-                )
+                    module.params['started_by'],
+                    module.params['wait']
+                ))
             results['changed'] = True
 
     elif module.params['operation'] == 'stop':
