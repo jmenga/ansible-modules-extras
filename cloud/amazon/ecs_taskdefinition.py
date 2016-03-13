@@ -147,12 +147,18 @@ class EcsTaskManager:
 
 def merge_lists(items, updates, key):
     result = []
+    # Update existing items
     for item in items:
         update = next((u for u in updates if u[key] == item[key]), None)
         if update:
             result.append(dict(item,**update))
         else:
             result.append(item)
+    # Create new item if not existing
+    for update in updates:
+        existing = next((i for i in items if i[key] == update[key]), None)
+        if not existing:
+            result.append(update)
     return result
 
 def main():
