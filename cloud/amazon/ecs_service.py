@@ -238,6 +238,19 @@ class EcsServiceManager:
     def delete_service(self, service, cluster=None):
         return self.ecs.delete_service(cluster=cluster, service=service)
 
+def json_serial(obj):
+    """JSON serializer for objects not serializable by default json code"""
+    if isinstance(obj, datetime.datetime):
+        serial = obj.isoformat()
+        return serial
+    raise TypeError ("Type not serializable")
+
+def fix_datetime(result):
+    """Temporary fix to convert datetime fields from Boto3 to datetime string."""
+    """See https://github.com/ansible/ansible-modules-extras/issues/1348."""
+    """Not required for Ansible 2.1"""
+    return json.loads(json.dumps(result, default=json_serial))
+
 def main():
 
     argument_spec = ec2_argument_spec()
@@ -301,7 +314,7 @@ def main():
                 wait = module.params.get('wait')
 
                 # Service doesn't exist or is inactive so create the service
-                response = service_mgr.create_service(module.params['name'],
+                response = fix_datetime(service_mgr.create_service(module.params['name'],
                     module.params['cluster'],
                     taskDefinition,
                     loadBalancers,
@@ -309,7 +322,7 @@ def main():
                     clientToken,
                     role,
                     deploymentConfig,
-                    wait)
+                    wait))
                 results['service'] = response
             results['changed'] = True
 
@@ -320,12 +333,12 @@ def main():
             taskDefinition = module.params.get('task_definition') or existing.get('taskDefinition')
             deploymentConfig = module.params.get('deployment_config') or existing.get('deploymentConfiguration')
             wait = module.params.get('wait') 
-            response = service_mgr.update_service(module.params['name'],
+            response = fix_datetime(service_mgr.update_service(module.params['name'],
                 module.params['cluster'],
                 taskDefinition,
                 desiredCount,
                 deploymentConfig,
-                wait)
+                wait))
             results['service'] = response
         results['changed'] = True
 
@@ -343,10 +356,10 @@ def main():
             else:
                 if not module.check_mode:
                     try:
-                        service_mgr.delete_service(
+                        fix_datetime(service_mgr.delete_service(
                             module.params['name'],
                             module.params['cluster']
-                        )
+                        ))
                     except botocore.exceptions.ClientError, e:
                         module.fail_json(msg=e.message)
                 results['changed'] = True
