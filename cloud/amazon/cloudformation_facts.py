@@ -148,7 +148,7 @@ class CloudFormationServiceManager:
 
         try:
             self.client = boto3.client('cloudformation')
-        except boto.exception.NoAuthHandlerFound, e:
+        except boto.exception.NoAuthHandlerFound as e:
             self.module.fail_json(msg="Can't authorize connection - "+str(e))
 
     def describe_stack(self, stack_name):
@@ -158,21 +158,21 @@ class CloudFormationServiceManager:
             if response:
                 return response[0]
             self.module.fail_json(msg="Error describing stack - an empty response was returned")
-        except Exception, e:
+        except Exception as e:
             self.module.fail_json(msg="Error describing stack - " + str(e))
     
     def list_stack_resources(self, stack_name):
         try:
             func = partial(self.client.describe_stack_resources,StackName=stack_name)
             return self.paginated_response(func, 'StackResources')
-        except Exception, e:
+        except Exception as e:
             self.module.fail_json(msg="Error listing stack resources - " + str(e))
 
     def describe_stack_events(self, stack_name):
         try:
             func = partial(self.client.describe_stack_events,StackName=stack_name)
             return self.paginated_response(func, 'StackEvents')
-        except Exception, e:
+        except Exception as e:
             self.module.fail_json(msg="Error describing stack events - " + str(e))
 
     def get_stack_policy(self, stack_name):
@@ -182,14 +182,14 @@ class CloudFormationServiceManager:
             if stack_policy:
                 return json.loads(stack_policy)
             return dict()
-        except Exception, e:
+        except Exception as e:
             self.module.fail_json(msg="Error getting stack policy - " + str(e))
 
     def get_template(self, stack_name):
         try:
             response = self.client.get_template(StackName=stack_name)
             return response.get('TemplateBody')
-        except Exception, e:
+        except Exception as e:
             self.module.fail_json(msg="Error getting stack template - " + str(e))
 
     def paginated_response(self, func, result_key, next_token=None):
