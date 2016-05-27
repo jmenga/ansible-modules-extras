@@ -29,7 +29,7 @@ author: Justin Menga (@jmenga)
 options:
     stack_name:
         description:
-          - The name of the CloudFormation stack
+          - The name or id of the CloudFormation stack
         required: true
     all_facts:
         description:
