@@ -76,6 +76,24 @@ EXAMPLES = '''
     stack_name: my-cloudformation-stack
     stack_resources: true
     stack_policy: true
+
+# Example dictionary outputs for stack_outputs, stack_parameters and stack_resources:
+"stack_outputs": {
+    "ApplicationDatabaseName": "dazvlpr01xj55a.ap-southeast-2.rds.amazonaws.com",
+    ...
+},
+"stack_parameters": {
+    "DatabaseEngine": "mysql",
+    "DatabasePassword": "****",
+    ...
+},
+"stack_resources": {
+    "AutoscalingGroup": "dev-someapp-AutoscalingGroup-1SKEXXBCAN0S7",
+    "AutoscalingSecurityGroup": "sg-abcd1234",
+    "ApplicationDatabase": "dazvlpr01xj55a",
+    "EcsTaskDefinition": "arn:aws:ecs:ap-southeast-2:123456789:task-definition/dev-someapp-EcsTaskDefinition-1F2VM9QB0I7K9:1"
+    ...
+}
 '''
 
 RETURN = '''
@@ -111,26 +129,6 @@ stack_resources:
     description: Dictionary of stack resources keyed by the value of each resource 'LogicalResourceId' parameter and corresponding value of each resource 'PhysicalResourceId' parameter
     returned: only if all_facts or stack_resourses is true
     type: dict
-
-# Example dictionary outputs for stack_outputs, stack_parameters and stack_resources:
-
-"stack_outputs": {
-    "ApplicationDatabaseName": "dazvlpr01xj55a.ap-southeast-2.rds.amazonaws.com",
-    ...
-},
-"stack_parameters": {
-    "DatabaseEngine": "mysql",
-    "DatabasePassword": "****",
-    ...
-},
-"stack_resources": {
-    "AutoscalingGroup": "dev-someapp-AutoscalingGroup-1SKEXXBCAN0S7",
-    "AutoscalingSecurityGroup": "sg-abcd1234",
-    "ApplicationDatabase": "dazvlpr01xj55a",
-    "EcsTaskDefinition": "arn:aws:ecs:ap-southeast-2:123456789:task-definition/dev-someapp-EcsTaskDefinition-1F2VM9QB0I7K9:1"
-    ...
-}
-            
 '''
 
 try:
