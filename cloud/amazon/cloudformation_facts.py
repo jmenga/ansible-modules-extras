@@ -147,7 +147,10 @@ class CloudFormationServiceManager:
         self.module = module
 
         try:
-            self.client = boto3.client('cloudformation')
+            region, ec2_url, aws_connect_kwargs = get_aws_connection_info(module, boto3=True)
+            self.client = boto3.client('cloudformation', region_name=region, **aws_connect_kwargs)
+        except botocore.exceptions.NoRegionError:
+            self.module.fail_json(msg="Region must be specified as a parameter, in AWS_DEFAULT_REGION environment variable or in boto configuration file")
         except boto.exception.NoAuthHandlerFound as e:
             self.module.fail_json(msg="Can't authorize connection - "+str(e))
 
