@@ -25,6 +25,24 @@ dependencies:
 version_added: "2.2"
 author: Justin Menga (@jmenga)
 options:
+    operation: 
+      description:
+        - The snapshot operation to perform
+        - The default operation is 'snapshot', which creates, copies and/or shares snapshos
+        - The 'purge' operation retains one or more snapshots (as specified by the 'retain_count' setting) matching the 'snapshot_filter' setting, and requires 'db_instance_id' to be set
+        - The 'facts' operation displays snapshot information about the specified snapshot id or database instance id.
+      required: false
+      default: snapshot
+    snapshot_filter:
+      description:
+        - Regular expression that filters snapshots to be purged.
+      required: false
+      default: .*
+    retain_count:
+      description:
+        - The number of snapshots to retain.
+      required: false
+      default: 10
     db_instance_id:
       description:
         - The RDS DB Instance Identifier of the source database.  
@@ -123,6 +141,13 @@ EXAMPLES = '''
       - region: us-west-2
         accounts:
           - 12345678902
+
+# Purges snapshots for db instance pbcnim3c08eueg that include the word 'daily' so that only the latest 14 snapshots remain
+- rds_snapshot:
+    db_instance_id: pbcnim3c08eueg
+    operation: purge
+    snapshot_filter: daily
+    purge_count: 14
 '''
 
 RETURN = '''
@@ -197,18 +222,20 @@ class RdsServiceManager:
           return None
       self.module.fail_json(msg="Invalid parameters supplied - either snapshot_id or db_instance_id must be specified")
 
-    def describe_snapshots(self, db_instance_id=None, **kwargs):
+    def describe_snapshots(self, db_instance_id=None, snapshot_filter='.*', **kwargs):
       response = self.client.describe_db_snapshots(**kwargs).get('DBSnapshots')
       if db_instance_id and response:
         response = sorted(
-          [s for s in response if s.get('DBInstanceIdentifier') == db_instance_id],
+          [s for s in response 
+             if s.get('DBInstanceIdentifier') == db_instance_id 
+             and re.search(snapshot_filter,s.get('DBSnapshotIdentifier'))],
           key=lambda snapshot: snapshot['SnapshotCreateTime'],
           reverse=True
         )
       if response:
         return response[0]
       else:
-        return None
+        return list()
 
     def poll_snapshot_status(self, snapshot):
       changed = False
@@ -277,6 +304,9 @@ class RdsServiceManager:
       attributes = response.get('DBSnapshotAttributesResult').get('DBSnapshotAttributes')
       return next((a.get('AttributeValues') for a in attributes if a.get('AttributeName') == 'restore'),[])
 
+    def delete_snapshot(self, db_snapshot_id):
+      return self.client.delete_db_snapshot(DBSnapshotIdentifier=db_snapshot_id)
+
 def get_snapshot_name(snapshot=dict(), snapshot_prefix='', create_time=None):
   if not snapshot:
     create_time = create_time or time
@@ -304,7 +334,10 @@ def main():
         timeout=dict(required=False, default=900, type='int'),
         tags=dict(required=False, default={}, type='dict'),
         copy_tags=dict(required=False,default=False, type='bool'),
-        kms_key_id=dict(required=False, default='', type='str')
+        kms_key_id=dict(required=False, default='', type='str'),
+        operation=dict(required=False, default='snapshot', type='str'),
+        snapshot_filter=dict(required=False, type='str'),
+        retain_count=dict(required=False, default=10, type='int')
     ))
     module = AnsibleModule(argument_spec=argument_spec, supports_check_mode=False)
     if not HAS_BOTO3:
@@ -312,6 +345,7 @@ def main():
     
     # Get parameters
     service_mgr = RdsServiceManager(module)
+    operation = module.params.get('operation')
     db_instance_id = module.params.get('db_instance_id')
     source_snapshot_id = module.params.get('source_snapshot_id')
     snapshot_prefix = module.params.get('snapshot_prefix') or ''
@@ -333,108 +367,120 @@ def main():
     result = dict()
     result['changed'] = False
 
-    # We use either a source snapshot or db instance id
-    if source_snapshot_id:
-      snapshot = service_mgr.describe_snapshot(
-        snapshot_id=source_snapshot_id,
-        IncludeShared=True,
-        IncludePublic=True
-      )
-      if not snapshot:
-          module.fail_json(msg='Could not find snapshot for ' + source_snapshot_id)
-      result['source_snapshot'] = snapshot
-      if snapshot['SnapshotType'] in ['automated','shared','public']:
-        # Snapshot type is not manual, so we need to create a manual copy
-        snapshot_name = snapshot_name or get_snapshot_name(snapshot=snapshot, snapshot_prefix=snapshot_prefix)
-        snapshot = service_mgr.copy_or_existing(
-          snapshot, 
-          snapshot_name, 
-          kms_key_id=kms_key_id, 
-          tags=tags, 
-          copy_tags=copy_tags
-        )
-        snapshot, result['changed'] = service_mgr.poll_snapshot_status(snapshot)
-    elif db_instance_id:
-      if snapshot_type in ['shared','public','automated']:
-        # Find latest snapshot
-        snapshot = service_mgr.describe_snapshot(
-          db_instance_id=db_instance_id, 
-          SnapshotType=snapshot_type,
-          IncludeShared=(snapshot_type == 'shared'),
-          IncludePublic=(snapshot_type == 'public')
-          )
-        result['source_snapshot'] = snapshot
-        if not snapshot:
-          module.fail_json(msg='Could not find latest ' + snapshot_type + ' snapshot for ' + db_instance_id)
-        snapshot_name = snapshot_name or get_snapshot_name(snapshot=snapshot, snapshot_prefix=snapshot_prefix)
-        snapshot = service_mgr.copy_or_existing(
-          snapshot, 
-          snapshot_name, 
-          kms_key_id=kms_key_id, 
-          tags=tags, 
-          copy_tags=copy_tags
-        )
-        snapshot, result['changed'] = service_mgr.poll_snapshot_status(snapshot)
-      else:
-        # Create a point-in-time snapshot from DB instance
-        snapshot_prefix = snapshot_prefix or 'manual-' + db_instance_id
-        snapshot_name = snapshot_name or get_snapshot_name(snapshot_prefix=snapshot_prefix, create_time=time)
-        snapshot = service_mgr.describe_snapshot(snapshot_id=snapshot_name)
-        if not snapshot:
-          snapshot = service_mgr.create_snapshot(
-            db_snapshot_id=snapshot_name, 
-            db_instance_id=db_instance_id, 
-            tags=tags
-          )
-          snapshot, result['changed'] = service_mgr.poll_snapshot_status(snapshot)
-          result['source_snapshot'] = {}
+    # Check operation
+    if operation == 'purge':
+      if not db_instance_id:
+        module.fail_json(msg="You must specify a value for 'db_instance_id' when purging")
+      snapshot_filter = snapshot_filter or '.*'
+      snapshots = service_mgr.describe_snapshots(db_instance_id=db_instance_id, snapshot_filter=snapshot_filter)[:retain_count]
+      for snapshot in snapshots:
+        service_mgr.delete_snapshot(snapshot.get('DBSnapshotIdentifier'))
+      result['changed'] = True
+    elif operation == 'facts':
+      # Do something here
     else:
-      module.fail_json(msg='You must specify either db_instance_id or source_snapshot_id')
-
-    # Share with local destinations
-    result['local_destinations'] = []
-    if local_destinations:
-      result['changed'] = service_mgr.share_or_existing(snapshot,local_destinations)
-      result['local_destinations'] = local_destinations
-
-    # Copy and share with remote destinations
-    # Each copy is initiated prior to polling to allow 
-    # multiple snapshot copy operations to run concurrently
-    local_region = service_mgr.region
-    local_account = service_mgr.account
-    result['remote_destinations'] = []
-
-    for remote_destination in remote_destinations:
-      region = remote_destination.get('region')
-      accounts = remote_destination.get('accounts') or []
-      if region != local_region:
-        # Copy snapshot to remote region
-        service_mgr = RdsServiceManager(module,region)
-        remote_snapshot = service_mgr.describe_snapshot(db_instance_id=snapshot['DBInstanceIdentifier'], snapshot_id=snapshot['DBSnapshotIdentifier'])
-        if not remote_snapshot:
-          snapshot_arn = get_snapshot_arn(snapshot['DBSnapshotIdentifier'],local_region, service_mgr.account)
-          remote_snapshot = service_mgr.copy_snapshot(
-            source_db_snapshot_id=snapshot_arn,
-            target_db_snapshot_id=snapshot['DBSnapshotIdentifier'],
+      # We use either a source snapshot or db instance id
+      if source_snapshot_id:
+        snapshot = service_mgr.describe_snapshot(
+          snapshot_id=source_snapshot_id,
+          IncludeShared=True,
+          IncludePublic=True
+        )
+        if not snapshot:
+            module.fail_json(msg='Could not find snapshot for ' + source_snapshot_id)
+        result['source_snapshot'] = snapshot
+        if snapshot['SnapshotType'] in ['automated','shared','public']:
+          # Snapshot type is not manual, so we need to create a manual copy
+          snapshot_name = snapshot_name or get_snapshot_name(snapshot=snapshot, snapshot_prefix=snapshot_prefix)
+          snapshot = service_mgr.copy_or_existing(
+            snapshot, 
+            snapshot_name, 
             kms_key_id=kms_key_id, 
-            tags=tags,
+            tags=tags, 
             copy_tags=copy_tags
           )
-          result['changed'] = True
-        result['remote_destinations'].append({ 
-          'region': region, 
-          'snapshot': remote_snapshot, 
-          'snapshot_arn': get_snapshot_arn(remote_snapshot['DBSnapshotIdentifier'],region,local_account),
-          'accounts': accounts 
-        })
+          snapshot, result['changed'] = service_mgr.poll_snapshot_status(snapshot)
+      elif db_instance_id:
+        if snapshot_type in ['shared','public','automated']:
+          # Find latest snapshot
+          snapshot = service_mgr.describe_snapshot(
+            db_instance_id=db_instance_id, 
+            SnapshotType=snapshot_type,
+            IncludeShared=(snapshot_type == 'shared'),
+            IncludePublic=(snapshot_type == 'public')
+            )
+          result['source_snapshot'] = snapshot
+          if not snapshot:
+            module.fail_json(msg='Could not find latest ' + snapshot_type + ' snapshot for ' + db_instance_id)
+          snapshot_name = snapshot_name or get_snapshot_name(snapshot=snapshot, snapshot_prefix=snapshot_prefix)
+          snapshot = service_mgr.copy_or_existing(
+            snapshot, 
+            snapshot_name, 
+            kms_key_id=kms_key_id, 
+            tags=tags, 
+            copy_tags=copy_tags
+          )
+          snapshot, result['changed'] = service_mgr.poll_snapshot_status(snapshot)
+        else:
+          # Create a point-in-time snapshot from DB instance
+          snapshot_prefix = snapshot_prefix or 'manual-' + db_instance_id
+          snapshot_name = snapshot_name or get_snapshot_name(snapshot_prefix=snapshot_prefix, create_time=time)
+          snapshot = service_mgr.describe_snapshot(snapshot_id=snapshot_name)
+          if not snapshot:
+            snapshot = service_mgr.create_snapshot(
+              db_snapshot_id=snapshot_name, 
+              db_instance_id=db_instance_id, 
+              tags=tags
+            )
+            snapshot, result['changed'] = service_mgr.poll_snapshot_status(snapshot)
+            result['source_snapshot'] = {}
+      else:
+        module.fail_json(msg='You must specify either db_instance_id or source_snapshot_id')
 
-    # Poll and share operations
-    for destination in result['remote_destinations']:
-      remote_snapshot = service_mgr.poll_snapshot_status(destination['snapshot'])
-      # Share to accounts in remote region
-      accounts = destination.get('accounts')
-      if accounts:
-        result['changed'] = result['changed'] or service_mgr.share_or_existing(remote_snapshot,accounts)
+      # Share with local destinations
+      result['local_destinations'] = []
+      if local_destinations:
+        result['changed'] = service_mgr.share_or_existing(snapshot,local_destinations)
+        result['local_destinations'] = local_destinations
+
+      # Copy and share with remote destinations
+      # Each copy is initiated prior to polling to allow 
+      # multiple snapshot copy operations to run concurrently
+      local_region = service_mgr.region
+      local_account = service_mgr.account
+      result['remote_destinations'] = []
+
+      for remote_destination in remote_destinations:
+        region = remote_destination.get('region')
+        accounts = remote_destination.get('accounts') or []
+        if region != local_region:
+          # Copy snapshot to remote region
+          service_mgr = RdsServiceManager(module,region)
+          remote_snapshot = service_mgr.describe_snapshot(db_instance_id=snapshot['DBInstanceIdentifier'], snapshot_id=snapshot['DBSnapshotIdentifier'])
+          if not remote_snapshot:
+            snapshot_arn = get_snapshot_arn(snapshot['DBSnapshotIdentifier'],local_region, service_mgr.account)
+            remote_snapshot = service_mgr.copy_snapshot(
+              source_db_snapshot_id=snapshot_arn,
+              target_db_snapshot_id=snapshot['DBSnapshotIdentifier'],
+              kms_key_id=kms_key_id, 
+              tags=tags,
+              copy_tags=copy_tags
+            )
+            result['changed'] = True
+          result['remote_destinations'].append({ 
+            'region': region, 
+            'snapshot': remote_snapshot, 
+            'snapshot_arn': get_snapshot_arn(remote_snapshot['DBSnapshotIdentifier'],region,local_account),
+            'accounts': accounts 
+          })
+
+      # Poll and share operations
+      for destination in result['remote_destinations']:
+        remote_snapshot = service_mgr.poll_snapshot_status(destination['snapshot'])
+        # Share to accounts in remote region
+        accounts = destination.get('accounts')
+        if accounts:
+          result['changed'] = result['changed'] or service_mgr.share_or_existing(remote_snapshot,accounts)
 
     result['snapshot'] = snapshot
     result['snapshot_arn'] = get_snapshot_arn(snapshot['DBSnapshotIdentifier'],local_region,local_account)
