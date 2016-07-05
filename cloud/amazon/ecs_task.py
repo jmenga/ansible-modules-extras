@@ -21,7 +21,9 @@ short_description: run, start or stop a task in ecs
 description:
     - Creates or deletes instances of task definitions.
 version_added: "2.0"
-author: Mark Chance(@Java1Guy)
+author: 
+    - Mark Chance(@Java1Guy)
+    - Justin Menga(@jmenga)
 requirements: [ json, boto, botocore, boto3 ]
 options:
     operation:
@@ -36,6 +38,7 @@ options:
     task_definition:
         description:
             - The task definition to start or run
+            - This can either be the task definition family name or ARN of the task definition
         required: False
     overrides:
         description:
@@ -57,6 +60,13 @@ options:
         description:
             - A value showing who or what started the task (for informational purposes)
         required: False
+    timeout:
+        description: 
+            - The time to wait for the task to complete
+            - A value of 0 (default) will not wait for the task to complete
+            - If the task does not complete within the timeout period, a failure will occur
+        required: False
+        default: 0
 extends_documentation_fragment:
     - aws
     - ec2
@@ -73,8 +83,33 @@ EXAMPLES = '''
     started_by: ansible_user
   register: task_output
 
-# Simple example of start task
+# Simple example of run task and wait 300 seconds for task to complete
+- name: Run task with timeout
+  ecs_task:
+      operation: run
+      cluster: console-sample-app-static-cluster
+      task_definition: console-sample-app-static-taskdef
+      timeout: 300
 
+# Simple example of run task with overrides
+# For environment variables, the overrides will append or overwrite to the environment
+# variables defined in the specified task defintion
+- name: Run task with overrides
+  ecs_task:
+      operation: run
+      cluster: console-sample-app-static-cluster
+      task_definition: console-sample-app-static-taskdef
+      overrides: 
+        containerOverrides:
+            - name: my-container
+              command: 
+                - run.sh
+                - "--some-flag"
+              environment:
+                - name: SOME_VAR
+                  value: some value            
+
+# Simple example of start task
 - name: Start a task
   ecs_task:
       operation: start
@@ -152,6 +187,7 @@ task:
             returned: only when details is true
             type: string
 '''
+import time
 try:
     import boto
     import botocore
@@ -179,19 +215,28 @@ class EcsExecManager:
         except boto.exception.NoAuthHandlerFound, e:
             module.fail_json(msg="Can't authorize connection - "+str(e))
 
-    def list_tasks(self, cluster_name, service_name, status):
-        response = self.ecs.list_tasks(
-            cluster=cluster_name,
-            family=service_name,
-            desiredStatus=status
-        )
-        if len(response['taskArns'])>0:
-            for c in response['taskArns']:
-                if c.endswith(service_name):
-                    return c
-        return None
+    def poll_tasks(self, status, cluster, timeout):
+        poll_interval = 10
+        poll_count = timeout / poll_interval + 1
+        counter = 0
+        while counter < poll_count:
+            failures = status.get('failures')
+            if failures:
+                self.module.fail_json(msg='One or more tasks failed - ' + str(failures))
+            tasks = status.get('tasks')
+            tasks_complete = all(t.get('lastStatus') == 'STOPPED' for t in tasks)
+            if tasks_complete:
+                non_zero = [c.get('taskArn') for t in tasks for c in t.get('containers') if c.get('exitCode') != 0]
+                if non_zero:
+                    self.module.fail_json(msg='The following tasks failed with a non-zero exit code - ' + str(non_zero))
+                else:
+                    return status
+            status = self.ecs.describe_tasks(cluster=cluster, tasks=[task.get('taskArn') for task in tasks])
+            time.sleep(poll_interval)
+            counter += 1
+        self.module.fail_json(msg='Timed out waiting for tasks to complete - current status: ' + str(tasks))
 
-    def run_task(self, cluster, task_definition, overrides, count, startedBy):
+    def run_task(self, cluster, task_definition, overrides, count, startedBy, timeout):
         if overrides is None:
             overrides = dict()
         response = self.ecs.run_task(
@@ -201,9 +246,11 @@ class EcsExecManager:
             count=count,
             startedBy=startedBy)
         # include tasks and failures
+        if timeout > 0:
+            response = self.poll_tasks(response, cluster, timeout)
         return response['tasks']
 
-    def start_task(self, cluster, task_definition, overrides, container_instances, startedBy):
+    def start_task(self, cluster, task_definition, overrides, container_instances, startedBy, timeout):
         args = dict()
         if cluster:
             args['cluster'] = cluster
@@ -217,6 +264,8 @@ class EcsExecManager:
             args['startedBy']=startedBy
         response = self.ecs.start_task(**args)
         # include tasks and failures
+        if timeout > 0:
+            response = self.poll_tasks(response, cluster, timeout)
         return response['tasks']
 
     def stop_task(self, cluster, task):
@@ -230,10 +279,11 @@ def main():
         cluster=dict(required=False, type='str' ), # R S P
         task_definition=dict(required=False, type='str' ), # R* S*
         overrides=dict(required=False, type='dict'), # R S
-        count=dict(required=False, type='int' ), # R
+        count=dict(required=False, type='int', default=1), # R
         task=dict(required=False, type='str' ), # P*
         container_instances=dict(required=False, type='list'), # S*
-        started_by=dict(required=False, type='str' ) # R S
+        started_by=dict(required=False, type='str', default='ansible'), # R S
+        timeout=dict(required=False, type='int', default=0)
     ))
 
     module = AnsibleModule(argument_spec=argument_spec, supports_check_mode=True)
@@ -269,50 +319,41 @@ def main():
         status_type = "STOPPED"
 
     service_mgr = EcsExecManager(module)
-    existing = service_mgr.list_tasks(module.params['cluster'], task_to_list, status_type)
 
     results = dict(changed=False)
     if module.params['operation'] == 'run':
-        if existing:
-            # TBD - validate the rest of the details
-            results['task']=existing
-        else:
-            if not module.check_mode:
-                results['task'] = service_mgr.run_task(
-                    module.params['cluster'],
-                    module.params['task_definition'],
-                    module.params['overrides'],
-                    module.params['count'],
-                    module.params['started_by'])
-            results['changed'] = True
+        if not module.check_mode:
+            results['task'] = service_mgr.run_task(
+                module.params['cluster'],
+                module.params['task_definition'],
+                module.params['overrides'],
+                module.params['count'],
+                module.params['started_by'],
+                module.params['timeout']
+            )
+        results['changed'] = True
 
     elif module.params['operation'] == 'start':
-        if existing:
-            # TBD - validate the rest of the details
-            results['task']=existing
-        else:
-            if not module.check_mode:
-                results['task'] = service_mgr.start_task(
-                    module.params['cluster'],
-                    module.params['task_definition'],
-                    module.params['overrides'],
-                    module.params['container_instances'],
-                    module.params['started_by']
-                )
-            results['changed'] = True
+        if not module.check_mode:
+            results['task'] = service_mgr.start_task(
+                module.params['cluster'],
+                module.params['task_definition'],
+                module.params['overrides'],
+                module.params['container_instances'],
+                module.params['started_by'],
+                module.params['timeout']
+            )
+        results['changed'] = True
 
     elif module.params['operation'] == 'stop':
-        if existing:
-            results['task']=existing
-        else:
-            if not module.check_mode:
-            # it exists, so we should delete it and mark changed.
-            # return info about the cluster deleted
-                results['task'] = service_mgr.stop_task(
-                    module.params['cluster'],
-                    module.params['task']
-                )
-            results['changed'] = True
+        if not module.check_mode:
+        # it exists, so we should delete it and mark changed.
+        # return info about the cluster deleted
+            results['task'] = service_mgr.stop_task(
+                module.params['cluster'],
+                module.params['task']
+            )
+        results['changed'] = True
 
     module.exit_json(**results)
 
