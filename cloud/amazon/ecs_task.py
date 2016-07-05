@@ -61,6 +61,7 @@ options:
             - A value showing who or what started the task (for informational purposes)
         required: False
     timeout:
+        version_added: 2.2
         description: 
             - The time to wait for the task to complete
             - A value of 0 (default) will not wait for the task to complete
