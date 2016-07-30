@@ -166,8 +166,8 @@ class CloudFormationServiceManager:
     
     def list_stack_resources(self, stack_name):
         try:
-            func = partial(self.client.describe_stack_resources,StackName=stack_name)
-            return self.paginated_response(func, 'StackResources')
+            func = partial(self.client.list_stack_resources,StackName=stack_name)
+            return self.paginated_response(func, 'StackResourceSummaries')
         except Exception as e:
             self.module.fail_json(msg="Error listing stack resources - " + str(e))
 
