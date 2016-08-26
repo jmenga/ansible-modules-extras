@@ -20,8 +20,9 @@ module: cloudformation_facts
 short_description: Obtain facts about an AWS CloudFormation stack
 description:
   - Gets information about an AWS CloudFormation stack
-dependencies:
-  - boto3>=1.0.0
+requirements:
+  - boto3 >= 1.0.0
+  - python >= 2.6
 version_added: "2.2"
 author: Justin Menga (@jmenga)
 options:
@@ -236,25 +237,28 @@ def main():
     # Describe the stack            
     service_mgr = CloudFormationServiceManager(module)
     stack_name = module.params.get('stack_name')
-    result = dict()
-    result['stack_description'] = service_mgr.describe_stack(stack_name)
+    result = { 
+        'ansible_facts': { 'cloudformation': { stack_name:{} } }
+    }
+    facts = result['ansible_facts']['cloudformation'][stack_name]
+    facts['stack_description'] = service_mgr.describe_stack(stack_name)
 
     # Create stack output and stack parameter dictionaries
-    if result['stack_description']:
-        result['stack_outputs'] = to_dict(result['stack_description'].get('Outputs'), 'OutputKey', 'OutputValue')    
-        result['stack_parameters'] = to_dict(result['stack_description'].get('Parameters'), 'ParameterKey', 'ParameterValue')    
+    if facts['stack_description']:
+        facts['stack_outputs'] = to_dict(facts['stack_description'].get('Outputs'), 'OutputKey', 'OutputValue')    
+        facts['stack_parameters'] = to_dict(facts['stack_description'].get('Parameters'), 'ParameterKey', 'ParameterValue')    
 
     # Create optional stack outputs
     all_facts = module.params.get('all_facts')
     if all_facts or module.params.get('stack_resources'):
-        result['stack_resource_list'] = service_mgr.list_stack_resources(stack_name)
-        result['stack_resources'] = to_dict(result.get('stack_resource_list'), 'LogicalResourceId', 'PhysicalResourceId')
+        facts['stack_resource_list'] = service_mgr.list_stack_resources(stack_name)
+        facts['stack_resources'] = to_dict(facts.get('stack_resource_list'), 'LogicalResourceId', 'PhysicalResourceId')
     if all_facts or module.params.get('stack_template'):
-        result['stack_template'] = service_mgr.get_template(stack_name)
+        facts['stack_template'] = service_mgr.get_template(stack_name)
     if all_facts or module.params.get('stack_policy'):
-        result['stack_policy'] = service_mgr.get_stack_policy(stack_name)
+        facts['stack_policy'] = service_mgr.get_stack_policy(stack_name)
     if all_facts or module.params.get('stack_events'):
-        result['stack_events'] = service_mgr.describe_stack_events(stack_name)
+        facts['stack_events'] = service_mgr.describe_stack_events(stack_name)
 
     result['changed'] = False
     module.exit_json(**result)
