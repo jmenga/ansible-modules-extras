@@ -67,6 +67,9 @@ EXAMPLES = '''
 - cloudformation_facts:
     stack_name: my-cloudformation-stack
 
+# Facts are published in ansible_facts['cloudformation'][<stack_name>]
+- debug: msg={{ ansible_facts['cloudformation']['my-cloudformation-stack'] }}
+
 # Get all stack information about a stack
 - cloudformation_facts:
     stack_name: my-cloudformation-stack
@@ -138,6 +141,8 @@ try:
 except ImportError:
     HAS_BOTO3 = False
 
+from ansible.module_utils.ec2 import get_aws_connection_info, ec2_argument_spec
+from ansible.module_utils.basic import AnsibleModule
 from functools import partial
 import json
 
@@ -261,11 +266,7 @@ def main():
         facts['stack_events'] = service_mgr.describe_stack_events(stack_name)
 
     result['changed'] = False
-    module.exit_json(**result)
-
-# import module snippets
-from ansible.module_utils.basic import *
-from ansible.module_utils.ec2 import *
+    module.exit_json(ansible_facts=result)
 
 if __name__ == '__main__':
     main()
