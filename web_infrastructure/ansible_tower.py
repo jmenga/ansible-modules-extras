@@ -303,7 +303,7 @@ def main():
         manager = AnsibleTowerManager(module.params)
     except requests.exceptions.HTTPError as e:
         module.fail_json(msg='Tower authentication failed: %s %s' % (e, e.response.text))
-    except requests.exceptions.ConnectionError:
+    except requests.exceptions.ConnectionError as e:
         module.fail_json(msg='Could not connect to Tower host: %s' % e)
 
     # Get job template launch data
