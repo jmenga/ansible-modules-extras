@@ -137,6 +137,8 @@ stack_resources:
 
 try:
     import boto3
+    import botocore
+    import boto
     HAS_BOTO3 = True
 except ImportError:
     HAS_BOTO3 = False
@@ -145,6 +147,7 @@ from ansible.module_utils.ec2 import get_aws_connection_info, ec2_argument_spec
 from ansible.module_utils.basic import AnsibleModule
 from functools import partial
 import json
+import traceback
 
 class CloudFormationServiceManager:
     """Handles CloudFormation Services"""
@@ -158,7 +161,7 @@ class CloudFormationServiceManager:
         except botocore.exceptions.NoRegionError:
             self.module.fail_json(msg="Region must be specified as a parameter, in AWS_DEFAULT_REGION environment variable or in boto configuration file")
         except boto.exception.NoAuthHandlerFound as e:
-            self.module.fail_json(msg="Can't authorize connection - "+str(e))
+            self.module.fail_json(msg="Can't authorize connection - " + str(e), exception=traceback.format_exc(e))
 
     def describe_stack(self, stack_name):
         try:
@@ -168,21 +171,21 @@ class CloudFormationServiceManager:
                 return response[0]
             self.module.fail_json(msg="Error describing stack - an empty response was returned")
         except Exception as e:
-            self.module.fail_json(msg="Error describing stack - " + str(e))
+            self.module.fail_json(msg="Error describing stack - " + str(e), exception=traceback.format_exc(e))
     
     def list_stack_resources(self, stack_name):
         try:
             func = partial(self.client.list_stack_resources,StackName=stack_name)
             return self.paginated_response(func, 'StackResourceSummaries')
         except Exception as e:
-            self.module.fail_json(msg="Error listing stack resources - " + str(e))
+            self.module.fail_json(msg="Error listing stack resources - " + str(e), exception=traceback.format_exc(e))
 
     def describe_stack_events(self, stack_name):
         try:
             func = partial(self.client.describe_stack_events,StackName=stack_name)
             return self.paginated_response(func, 'StackEvents')
         except Exception as e:
-            self.module.fail_json(msg="Error describing stack events - " + str(e))
+            self.module.fail_json(msg="Error describing stack events - " + str(e), exception=traceback.format_exc(e))
 
     def get_stack_policy(self, stack_name):
         try:
@@ -192,14 +195,14 @@ class CloudFormationServiceManager:
                 return json.loads(stack_policy)
             return dict()
         except Exception as e:
-            self.module.fail_json(msg="Error getting stack policy - " + str(e))
-
+            self.module.fail_json(msg="Error getting stack policy - " + str(e), exception=traceback.format_exc(e))
+        
     def get_template(self, stack_name):
         try:
             response = self.client.get_template(StackName=stack_name)
             return response.get('TemplateBody')
         except Exception as e:
-            self.module.fail_json(msg="Error getting stack template - " + str(e))
+            self.module.fail_json(msg="Error getting stack template - " + str(e), exception=traceback.format_exc(e))
 
     def paginated_response(self, func, result_key, next_token=None):
         '''
