@@ -138,7 +138,6 @@ stack_resources:
 try:
     import boto3
     import botocore
-    import boto
     HAS_BOTO3 = True
 except ImportError:
     HAS_BOTO3 = False
@@ -160,8 +159,8 @@ class CloudFormationServiceManager:
             self.client = boto3.client('cloudformation', region_name=region, **aws_connect_kwargs)
         except botocore.exceptions.NoRegionError:
             self.module.fail_json(msg="Region must be specified as a parameter, in AWS_DEFAULT_REGION environment variable or in boto configuration file")
-        except boto.exception.NoAuthHandlerFound as e:
-            self.module.fail_json(msg="Can't authorize connection - " + str(e), exception=traceback.format_exc(e))
+        except Exception as e:
+            self.module.fail_json(msg="Can't establish connection - " + str(e), exception=traceback.format_exc(e))
 
     def describe_stack(self, stack_name):
         try:
